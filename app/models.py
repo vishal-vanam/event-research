@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 
 @dataclass
@@ -27,3 +27,18 @@ class WebResult:
     url: str
     snippet: Optional[str] = None
     page_age: Optional[str] = None
+
+@dataclass
+class DeepResearchReport:
+    provider: str      # e.g. "parallel-deep-research"
+    city: str
+    days_ahead: int
+    report: str        # markdown / rich text from Parallel
+
+@dataclass
+class CombinedResult:
+    city: str
+    days_ahead: int
+    events: List[Event]
+    web_results: List[WebResult]
+    parallel_report: Optional[str] = None

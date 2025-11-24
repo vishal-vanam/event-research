@@ -1,6 +1,8 @@
 import logging
 from fastapi import FastAPI, Query, HTTPException
 from app.models import WebResult 
+from app.models import CombinedResult
+from app.cache import combined_cache
 from pydantic import BaseModel
 
 from app.aggregator import get_city_events
@@ -9,6 +11,11 @@ from app.providers.ticketmaster import TicketmasterProvider
 from app.providers.seatgeek import SeatGeekProvider
 from app.providers.eventbrite import EventbriteProvider
 from app.providers.you_search import YouSearchProvider
+
+from app.models import DeepResearchReport
+from app.providers.parallel_deep_research import ParallelDeepResearchProvider
+
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -146,3 +153,119 @@ def research_events(
         )
         for r in results
     ]
+
+@app.get("/events/deep_research/parallel", response_model=DeepResearchReport)
+async def deep_research_parallel(
+    city: str,
+    days_ahead: int = Query(7, ge=1, le=30),
+) -> DeepResearchReport:
+    """
+    v1.2: Deep research via Parallel Web Systems Task API.
+
+    This is intentionally separate from the /events/research (You.com) endpoint
+    so you can control when you incur Deep Research cost.
+    """
+    provider = ParallelDeepResearchProvider()
+    if not provider.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Parallel API key (PARALLEL_API_KEY) not configured on server.",
+        )
+
+    report = provider.research_city_events(city=city, days_ahead=days_ahead)
+    if report is None:
+        raise HTTPException(
+            status_code=502,
+            detail="Parallel Deep Research failed or returned no output.",
+        )
+
+    return report
+
+@app.get("/events/combined", response_model=CombinedResult)
+async def combined_events(
+    city: str,
+    days_ahead: int = Query(settings.default_days_ahead, ge=1, le=30),
+    radius_km: int = Query(settings.default_radius_km, ge=1, le=100),
+    force_refresh: bool = Query(False, description="Bypass cache if true"),
+):
+    # Normalize city for cache key
+    city_norm = city.strip().lower()
+    cache_key = f"combined:{city_norm}:{days_ahead}:{radius_km}"
+
+    # ─────────────────────────────────────────────
+    # 1) Try cache unless force_refresh
+    # ─────────────────────────────────────────────
+    if not force_refresh:
+        cached = combined_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    # ─────────────────────────────────────────────
+    # 2) Geocode or fallback
+    # ─────────────────────────────────────────────
+    from app.api.http import geocode_city  # reuse your function
+    lat, lon = geocode_city(city)
+    if lat is None or lon is None:
+        # fallback to NYC coords
+        lat, lon = 40.7128, -74.006
+
+    start = datetime.now(timezone.utc)
+    end = start + timedelta(days=days_ahead)
+
+    # ─────────────────────────────────────────────
+    # 3) Structured events (v1)
+    # ─────────────────────────────────────────────
+    events = []
+    from app.providers.ticketmaster import TicketmasterProvider
+    tm = TicketmasterProvider()
+    if tm.api_key:
+        events.extend(
+            tm.get_events(
+                city=city,
+                latitude=lat,
+                longitude=lon,
+                start=start,
+                end=end,
+                radius_km=radius_km,
+            )
+        )
+
+    # (Optional: add SeatGeek / Eventbrite here)
+
+    # ─────────────────────────────────────────────
+    # 4) You.com deep research (v1.1)
+    # ─────────────────────────────────────────────
+    from app.providers.you_search import YouSearchProvider
+    you = YouSearchProvider()
+    if you.api_key:
+        web_results = you.search_city_events(city=city, days_ahead=days_ahead, limit=10)
+    else:
+        web_results = []
+
+    # ─────────────────────────────────────────────
+    # 5) Parallel deep research (v1.2)
+    # ─────────────────────────────────────────────
+    from app.providers.parallel_deep_research import ParallelDeepResearchProvider
+    parallel_provider = ParallelDeepResearchProvider()
+    parallel_report = None
+    if parallel_provider.is_configured:
+        try:
+            report_obj = parallel_provider.research_city_events(city=city, days_ahead=days_ahead)
+            if report_obj:
+                parallel_report = report_obj.report
+        except Exception:
+            parallel_report = None
+
+    combined = CombinedResult(
+        city=city,
+        days_ahead=days_ahead,
+        events=events,
+        web_results=web_results,
+        parallel_report=parallel_report,
+    )
+
+    # ─────────────────────────────────────────────
+    # 6) Store in cache and return
+    # ─────────────────────────────────────────────
+    combined_cache.set(cache_key, combined)
+    return combined

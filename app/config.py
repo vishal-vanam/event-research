@@ -16,9 +16,14 @@ class Settings:
     eventbrite_token: str | None = os.getenv("EVENTBRITE_TOKEN")
 
     you_api_key: str | None = os.getenv("YDC_API_KEY") or os.getenv("YOU_API_KEY")
-    
+
+    parallel_api_key: str | None = os.getenv("PARALLEL_API_KEY")
+    parallel_processor: str = os.getenv("PARALLEL_PROCESSOR", "ultra")
+
     default_radius_km: int = int(os.getenv("DEFAULT_RADIUS_KM", "25"))
     default_days_ahead: int = int(os.getenv("DEFAULT_DAYS_AHEAD", "7"))
+
+    cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 
 
 settings = Settings()
