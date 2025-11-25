@@ -15,6 +15,7 @@ from app.providers.seatgeek import SeatGeekProvider
 from app.providers.ticketmaster import TicketmasterProvider
 from app.providers.you_search import YouSearchProvider
 from app.providers.parallel_deep_research import ParallelDeepResearchProvider
+from app.providers.agentql import AgentQLEventsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,38 @@ async def deep_research_parallel(
 
     return report
 
+@app.get("/events/deep_research/agentql", response_model=list[WebResultOut])
+async def deep_research_agentql(
+    city: str = Query(..., description="City name or general location, e.g. 'Jersey City'"),
+    days_ahead: int = Query(settings.default_days_ahead, ge=1, le=30),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """
+    Deep research via Tiny Fish / AgentQL REST API, scraping an Eventbrite
+    city page for structured events.
+
+    This is a complementary, best-effort source alongside Ticketmaster/You/Parallel.
+    """
+    provider = AgentQLEventsProvider()
+    if not provider.api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="AgentQL API key (AGENTQL_API_KEY) not configured on server.",
+        )
+
+    results = provider.search_city_events(city=city, days_ahead=days_ahead, limit=limit)
+
+    return [
+        WebResultOut(
+            source=r.source,
+            title=r.title,
+            url=r.url,
+            snippet=r.snippet,
+            page_age=r.page_age,
+        )
+        for r in results
+    ]
+
 
 # ─────────────────────────────────────────────
 # /events/combined – v1 + v1.1 + v1.2
@@ -284,7 +317,7 @@ async def combined_events(
         logger.warning("Geocoding failed for %s, using default NYC coords", query)
         lat, lon = 40.7128, -74.006
 
-    start = datetime.now(timezone.utc)
+    start = datetime.now(timezone.utc) - timedelta(hours=1)
     end = start + timedelta(days=days_ahead)
 
     # 4) Structured events (Ticketmaster etc.)
@@ -322,7 +355,19 @@ async def combined_events(
         except Exception as exc:
             logger.error("Parallel deep research failed: %s", exc)
             parallel_report = None
+    
+    # 7) AgentQL deep research
+    agentql_provider = AgentQLEventsProvider()
+    agentql_results = []
+    if agentql_provider.api_key:
+        agentql_results = agentql_provider.search_city_events(
+            city=query,
+            days_ahead=days_ahead,
+            limit=10,
+        )
+    web_results.extend(agentql_results)
 
+    # 8) Combine and cache
     combined = CombinedResult(
         city=query,  # now represents generic location query string
         days_ahead=days_ahead,

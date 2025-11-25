@@ -16,7 +16,7 @@ def get_city_events(
     days_ahead: int = 7,
     radius_km: int = 25,
 ) -> List[Event]:
-    start = datetime.utcnow()
+    start = datetime.utcnow() - timedelta(hours=1)
     end = start + timedelta(days=days_ahead)
 
     events: list[Event] = []

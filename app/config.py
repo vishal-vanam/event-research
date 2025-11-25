@@ -20,6 +20,9 @@ class Settings:
     parallel_api_key: str | None = os.getenv("PARALLEL_API_KEY")
     parallel_processor: str = os.getenv("PARALLEL_PROCESSOR", "ultra")
 
+    agentql_api_key: str | None = os.getenv("AGENTQL_API_KEY") or os.getenv("TINYFISH_API_KEY")
+
+
     default_radius_km: int = int(os.getenv("DEFAULT_RADIUS_KM", "25"))
     default_days_ahead: int = int(os.getenv("DEFAULT_DAYS_AHEAD", "7"))
 
