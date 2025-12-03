@@ -1,6 +1,9 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
+from app.utils.paths import get_data_dir
+import json
+import uuid
 
 import httpx
 from fastapi import FastAPI, Query, HTTPException
@@ -22,7 +25,16 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 # Geocoding helper (generic: city / address / neighborhood)
 # ─────────────────────────────────────────────
+KNOWN_COORDS = { # TO-DO: remove after testing
+    # Jersey City
+    "jersey city": (40.7178, -74.0431),
+    "jersey city, nj": (40.7178, -74.0431),
 
+    # Philadelphia
+    "philadelphia": (39.9526, -75.1652),
+    "philadelphia, pa": (39.9526, -75.1652),
+    "philly": (39.9526, -75.1652),
+}
 def geocode_location(query: str):
     """
     Geocode ANY free-form location string: street, neighborhood, city, etc.
@@ -35,7 +47,11 @@ def geocode_location(query: str):
         # Nominatim requires a custom User-Agent
         "User-Agent": "event-research-app/1.0 (contact: you@example.com)"
     }
-
+    key = query.strip().lower()
+    if key in KNOWN_COORDS:
+        lat, lon = KNOWN_COORDS[key]
+        print(f"[geocode_location] Using known coords for '{query}': {lat}, {lon}")
+        return lat, lon
     try:
         resp = httpx.get(url, params=params, headers=headers, timeout=10)
         resp.raise_for_status()
@@ -293,6 +309,7 @@ async def combined_events(
     days_ahead: int = Query(settings.default_days_ahead, ge=1, le=30),
     radius_km: int = Query(settings.default_radius_km, ge=1, le=100),
     force_refresh: bool = Query(False, description="Bypass cache if true"),
+    debug_dump: bool = Query(False, description="If true, dump combined response to debug-*.json"),
 ):
     # 1) Select the query string
     query = (location or city or "").strip()
@@ -377,4 +394,27 @@ async def combined_events(
     )
 
     combined_cache.set(cache_key, combined)
+
+    # 9) Optional debug dump
+    if debug_dump:
+        try:
+            data_dir = get_data_dir()
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            safe_loc = query_norm.replace(" ", "_").replace(",", "")
+            filename = f"debug_combined_{safe_loc}_{ts}_{uuid.uuid4().hex[:8]}.json"
+            out_path = data_dir / filename
+
+            # Use .model_dump() if CombinedResult is a Pydantic model,
+            # otherwise vars() or dataclasses.asdict if it's a dataclass.
+            if hasattr(combined, "model_dump"):
+                payload = combined.model_dump()
+            else:
+                from dataclasses import asdict
+                payload = asdict(combined)
+
+            out_path.write_text(json.dumps(payload, indent=2))
+            logger.info("Debug dump written to %s", out_path)
+        except Exception as exc:
+            logger.error("Failed to write debug dump: %s", exc)
+
     return combined

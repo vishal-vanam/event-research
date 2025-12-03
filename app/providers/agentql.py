@@ -1,6 +1,6 @@
-# app/providers/agentql_events.py
 from __future__ import annotations
 
+import json
 import logging
 from typing import List
 
@@ -16,8 +16,8 @@ class AgentQLEventsProvider:
     """
     Tiny Fish / AgentQL-based deep research provider.
 
-    Uses AgentQL REST API (query-data) to scrape an events page
-    (right now we use Eventbrite's city page as a simple default).
+    Uses AgentQL REST API (query-data) to scrape an events page.
+    Right now we target Eventbrite's city listings as a simple default.
     """
 
     name = "agentql"
@@ -29,44 +29,52 @@ class AgentQLEventsProvider:
                 "AgentQL API key (AGENTQL_API_KEY) not set; AgentQLEventsProvider will return no results."
             )
 
-    def _build_city_events_url(self, city: str) -> str:
+    @staticmethod
+    def _build_city_events_url(city: str) -> str:
         """
-        Simple heuristic: map 'Jersey City' -> 'jersey-city' and hit Eventbrite city page.
-        You can tweak this later if you prefer another site.
+        Map "Philadelphia, PA" -> "philadelphia" slug and build Eventbrite URL:
+        https://www.eventbrite.com/d/united-states--philadelphia/events/
         """
-        slug = city.strip().lower().replace(",", "").replace(" ", "-")
-        # US-centered for now; adjust if needed
+        city_only = city.split(",")[0].strip().lower()
+        slug = city_only.replace(" ", "-")
         return f"https://www.eventbrite.com/d/united-states--{slug}/events/"
 
-    def search_city_events(self, city: str, days_ahead: int = 7, limit: int = 20) -> List[WebResult]:
+    def search_city_events(
+        self,
+        city: str,
+        days_ahead: int = 7,
+        limit: int = 20,
+    ) -> List[WebResult]:
         """
-        Use AgentQL REST API to extract 'events' from an Eventbrite city page.
+        Use AgentQL REST API (prompt mode) to extract events (title + url)
+        from an Eventbrite city listing page.
 
-        This is best-effort and meant as a deep-research complement to Ticketmaster.
+        This is best-effort and meant as a deep-research complement.
         """
         if not self.api_key:
             return []
 
         url = self._build_city_events_url(city)
 
-        # AgentQL query: define a structured output.
-        # AgentQL will try to find matching data on the page.
-        aql_query = """
-        {
-          events[] {
-            title
-            date
-            location
-            url
-          }
-        }
-        """
+        # Prompt-based extraction: let AgentQL infer the structure.
+        # IMPORTANT: no { } braces in this string, so it's safe as a normal str.
+        prompt = (
+            "You are extracting upcoming public events from this Eventbrite city listing page.\n"
+            "Return a JSON object with a top-level key 'events'.\n"
+            "The 'events' value must be a list (array) of objects.\n"
+            "Each object must have:\n"
+            "- 'title': the event name as a string\n"
+            "- 'url': the event detail URL as a string\n"
+            "Only include real events that link to an event detail page.\n"
+            "If you cannot find any events, return {\"events\": []}."
+        )
 
         payload = {
-            "query": aql_query,
+            "prompt": prompt,
             "url": url,
             "params": {
-                "wait_for": 2,
+                # Give the page a little time to load; tweak if needed
+                "wait_for": 3,
                 "is_scroll_to_bottom_enabled": True,
                 "mode": "fast",
                 "is_screenshot_enabled": False,
@@ -94,36 +102,66 @@ class AgentQLEventsProvider:
                 timeout=60,
             )
             resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # This will catch 4xx/5xx, incl. 422
+            text_preview = exc.response.text[:500] if exc.response is not None else ""
+            logger.error(
+                "AgentQL query-data HTTP error: %s, response snippet=%r",
+                exc,
+                text_preview,
+            )
+            return []
         except httpx.HTTPError as exc:
-            logger.error("AgentQL query-data request failed: %s", exc)
+            logger.error("AgentQL query-data request failed (network): %s", exc)
             return []
 
-        data = resp.json().get("data", {})
-        raw_events = data.get("events", []) or []
+        body = resp.json()
+        data = body.get("data")
+
+        if not isinstance(data, dict):
+            logger.warning(
+                "AgentQL response 'data' is not a dict. Top-level keys: %r",
+                list(body.keys()),
+            )
+            return []
+
+        raw_events = data.get("events") or []
+        if not isinstance(raw_events, list):
+            logger.warning(
+                "AgentQL 'events' is not a list. Type: %s, value: %r",
+                type(raw_events),
+                raw_events,
+            )
+            return []
 
         results: List[WebResult] = []
         for item in raw_events[:limit]:
+            if not isinstance(item, dict):
+                continue
             title = item.get("title") or "Untitled event"
             event_url = item.get("url") or url
-            date = item.get("date")
-            location = item.get("location")
-
-            snippet_parts = []
-            if date:
-                snippet_parts.append(f"Date: {date}")
-            if location:
-                snippet_parts.append(f"Location: {location}")
-            snippet = " | ".join(snippet_parts) if snippet_parts else None
 
             results.append(
                 WebResult(
                     source=self.name,
                     title=title,
                     url=event_url,
-                    snippet=snippet,
+                    snippet=None,
                     page_age=None,
                 )
             )
 
-        logger.info("AgentQLEventsProvider: parsed %d web results", len(results))
-        return results
+        logger.info(
+            "AgentQLEventsProvider: parsed %d web results (city=%r)",
+            len(results),
+            city,
+        )
+
+        # Extra debug: if we got 0 results, log a small sample of data for debugging
+        if not results:
+            logger.warning(
+                "AgentQLEventsProvider: 0 events parsed for city=%r. "
+                "Sample of 'data' key: %s",
+                city,
+                json.dumps(data, indent=2)[:1000],
+            )
