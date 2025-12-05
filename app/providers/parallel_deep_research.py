@@ -1,13 +1,55 @@
+# app/providers/parallel_deep_research.py
+from __future__ import annotations
+
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
 from parallel import Parallel as ParallelClient
-from parallel.types import TaskSpecParam, TextSchemaParam
+from parallel.types import TaskSpecParam, JsonSchemaParam  # keep your actual schema import here
 
 from app.config import settings
 from app.models import DeepResearchReport
 
 logger = logging.getLogger(__name__)
+
+EVENTS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "events": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": ["string", "null"]},
+                    "start_time": {"type": ["string", "null"]},
+                    "end_time": {"type": ["string", "null"]},
+                    "venue_name": {"type": ["string", "null"]},
+                    "city": {"type": ["string", "null"]},
+                    "country": {"type": ["string", "null"]},
+                    "lat": {"type": ["number", "null"]},
+                    "lon": {"type": ["number", "null"]},
+                    "category": {"type": ["string", "null"]},
+                    "url": {"type": ["string", "null"]},
+                    "price_min": {"type": ["number", "null"]},
+                    "price_max": {"type": ["number", "null"]},
+                    "headcount_bucket": {
+                        "type": ["string", "null"],
+                        "enum": ["small", "medium", "large", "stadium", None],
+                    },
+                    "headcount_confidence": {
+                        "type": ["number", "null"],
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                    },
+                },
+                "required": ["name"],
+                "additionalProperties": True,
+            },
+        }
+    },
+    "required": ["events"],
+    "additionalProperties": False,
+}
 
 
 class ParallelDeepResearchProvider:
@@ -30,72 +72,30 @@ class ParallelDeepResearchProvider:
         return self.client is not None
 
     def research_city_events(self, city: str, days_ahead: int = 7) -> Optional[DeepResearchReport]:
+        """
+        Call Parallel Task Run API and try to extract a structured events list
+        from the SDK's TaskRunJsonOutput / FieldBasis objects.
+
+        We do NOT do json.loads here; we work directly with the Python objects.
+        """
         if not self.client:
             return None
 
         prompt = f"""
-            You are an AI assistant that performs deep research about events.
+        You are an event data extractor.
 
-            Your task: research upcoming public events in **{city}** happening in the next **{days_ahead} days**.
+        Goal: Populate the "events" list in the JSON schema with real, upcoming in-person events in "{city}" over the next {days_ahead} days.
 
-            You MUST produce **two outputs** in a single response, in this exact order:
+        You MUST:
+        - Include as many real events as you can find.
+        - For each event, fill fields like name, start_time, venue_name, city, and url as accurately as possible.
+        - If you cannot find a specific field, leave it null.
+        - Do NOT leave the "events" list empty unless there are truly no relevant events.
 
-            ---
+        Focus on concerts, sports, festivals, cultural events, and significant community events.
+        """
 
-            ## 1. Markdown Report (Human-Readable)
 
-            Write a well-structured **Markdown report** with headings and bullet points covering:
-
-            ### Summary
-            - 2–4 bullet points summarizing the overall event scene in {city} for the next {days_ahead} days.
-
-            ### Notable Upcoming Events
-            For each important event, include:
-            - **Event name**
-            - Venue & neighborhood
-            - Date/time
-            - Type (music, sports, comedy, arts, etc.)
-            - Short 1-sentence description
-
-            ### Notable Venues
-            List any major venues with short notes.
-
-            ### Sources
-            List the URLs you used.
-
-            ---
-
-            ## 2. Structured JSON Block (Machine-Readable)
-
-            At the VERY END of the message, output **one fenced JSON code block**
-            containing a single JSON object matching this schema *exactly*:
-
-            ```json
-            {{
-            "events": [
-                {{
-                "name": "string or null",
-                "start_time": "ISO-8601 string or null",
-                "end_time": "ISO-8601 string or null",
-
-                "venue_name": "string or null",
-                "city": "string or null",
-                "country": "string or null",
-                "lat": "number or null",
-                "lon": "number or null",
-
-                "category": "string or null",
-                "url": "string or null",
-
-                "price_min": "number or null",
-                "price_max": "number or null",
-
-                "headcount_bucket": "small | medium | large | stadium | null",
-                "headcount_confidence": "number between 0.0 and 1.0 or null"
-                }}
-            ]
-            }}
-            """
         logger.info(
             "ParallelDeepResearchProvider.research_city_events: city=%s days_ahead=%s processor=%s",
             city,
@@ -104,47 +104,115 @@ class ParallelDeepResearchProvider:
         )
 
         try:
-            # 1) Create the task run (returns immediately)
             task_run = self.client.task_run.create(
                 input=prompt,
                 processor=self.processor,
                 task_spec=TaskSpecParam(
-                    output_schema=TextSchemaParam()  # text / markdown output
+                    output_schema=JsonSchemaParam(
+                        json_schema=EVENTS_SCHEMA  # or 'schema=' depending on SDK version
+                    )
                 ),
             )
 
-            # 2) Block until result
             run_result = self.client.task_run.result(task_run.run_id)
-
         except Exception as exc:
             logger.error("Parallel Deep Research API request failed: %s", exc)
             return None
 
-        # Extract text output
+        # This is whatever the SDK exposes as "output"
         output = getattr(run_result, "output", None)
         if output is None:
             logger.error("Parallel Deep Research result had no 'output' field: %r", run_result)
             return None
 
-        report_text: Optional[str] = None
-        for attr in ("content", "report", "text"):
-            if hasattr(output, attr):
-                val = getattr(output, attr)
-                if isinstance(val, str) and val.strip():
-                    report_text = val
-                    break
+        # HARD DEBUG: always visible even if logging misconfigures
+        print("[pws-debug] output type:", type(output))
+        print("[pws-debug] output repr snippet:", repr(output)[:600])
+        # ------------------------------------------------------------------
+        # 1) Try to extract structured JSON-like data from the SDK objects
+        # ------------------------------------------------------------------
+        structured: Dict[str, Any] = {"events": []}
 
-        if not report_text:
-            report_text = str(output).strip()
-
-        if not report_text:
-            logger.error("Parallel Deep Research returned empty output object: %r", output)
+        def _find_events_in_dict(obj: Any) -> Optional[List[Any]]:
+            """
+            Recursively search for a key named 'events' whose value is a list.
+            Return that list if found, else None.
+            """
+            if isinstance(obj, dict):
+                if "events" in obj and isinstance(obj["events"], list):
+                    return obj["events"]
+                for v in obj.values():
+                    found = _find_events_in_dict(v)
+                    if found is not None:
+                        return found
+            elif isinstance(obj, list):
+                for v in obj:
+                    found = _find_events_in_dict(v)
+                    if found is not None:
+                        return found
             return None
+
+        try:
+            raw: Optional[Dict[str, Any]] = None
+
+            if isinstance(output, dict):
+                raw = output
+            elif hasattr(output, "model_dump"):
+                # pydantic v2 style
+                raw = output.model_dump()  # type: ignore[attr-defined]
+            elif hasattr(output, "dict"):
+                # pydantic v1 style
+                raw = output.dict()  # type: ignore[attr-defined]
+            elif hasattr(output, "data"):
+                maybe = output.data  # type: ignore[attr-defined]
+                if isinstance(maybe, dict):
+                    raw = maybe
+
+            if raw is not None:
+                events_list = _find_events_in_dict(raw) or []
+                normalized: List[Dict[str, Any]] = []
+
+                for item in events_list:
+                    if isinstance(item, dict):
+                        normalized.append(item)
+                    elif hasattr(item, "model_dump"):
+                        normalized.append(item.model_dump())  # type: ignore[attr-defined]
+                    elif hasattr(item, "dict"):
+                        normalized.append(item.dict())  # type: ignore[attr-defined]
+                    else:
+                        try:
+                            normalized.append(vars(item))
+                        except Exception:
+                            continue
+
+                structured = {"events": normalized}
+            else:
+                logger.warning(
+                    "ParallelDeepResearchProvider: could not derive raw dict from output type %r",
+                    type(output),
+                )
+
+        except Exception as exc:
+            logger.error("Failed to interpret Parallel structured output: %s", exc)
+
+
+        # ------------------------------------------------------------------
+        # 2) Keep a string version around for debugging / inspection
+        # ------------------------------------------------------------------
+        report_text = str(output)
+
+        logger.info(
+            "ParallelDeepResearchProvider: extracted %d events from structured output",
+            len(structured.get("events", [])),
+        )
+        logger.info("ParallelDeepResearchProvider raw output repr: %r", output)
+        logger.info("ParallelDeepResearchProvider structured keys: %s", list(structured.keys()))
+        logger.info("ParallelDeepResearchProvider structured events length: %d", len(structured.get("events", [])))
 
         return DeepResearchReport(
             provider=self.name,
             city=city,
             days_ahead=days_ahead,
             report=report_text,
+            structured=structured,
         )
-

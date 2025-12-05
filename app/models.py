@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 
 @dataclass
@@ -19,6 +19,9 @@ class Event:
     url: Optional[str] = None
     price_min: Optional[float] = None
     price_max: Optional[float] = None
+    # NEW: PWS headcount enrichment
+    headcount_bucket: Optional[str] = None            # "small", "medium", "large", "stadium"
+    headcount_confidence: Optional[float] = None      # 0.0–1.0
 
 @dataclass
 class WebResult:
@@ -30,10 +33,11 @@ class WebResult:
 
 @dataclass
 class DeepResearchReport:
-    provider: str      # e.g. "parallel-deep-research"
+    provider: str
     city: str
     days_ahead: int
-    report: str        # markdown / rich text from Parallel
+    report: str  # raw text / repr for debugging
+    structured: Optional[Dict[str, Any]] = None  # e.g. {"events": [...]}
 
 @dataclass
 class CombinedResult:
