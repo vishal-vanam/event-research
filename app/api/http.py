@@ -4,7 +4,9 @@ from typing import List, Optional
 from app.utils.paths import get_data_dir
 import json
 import uuid
-
+from app.snapshot import load_latest_snapshot
+from app.models import Event
+import re
 import httpx
 from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel
@@ -65,6 +67,43 @@ def geocode_location(query: str):
         return None, None
 
     return float(data[0]["lat"]), float(data[0]["lon"])
+
+def _normalize_loc_for_snapshot(query: str) -> str:
+    # keep this consistent with snapshot.py & mine_location.py
+    return query.lower().replace(" ", "_").replace(",", "")
+
+
+def _event_out_from_dict(data: dict) -> EventOut:
+    """
+    Take one event dict from a snapshot (event_to_dict output)
+    and convert it into EventOut for the API.
+    """
+    return EventOut(
+        id=data.get("id", ""),
+        source=data.get("source", ""),
+        name=data.get("name", "Unnamed event"),
+        start_time=data.get("start_time") or "",
+        end_time=data.get("end_time"),
+        venue_name=data.get("venue_name"),
+        city=data.get("city"),
+        country=data.get("country"),
+        lat=data.get("lat"),
+        lon=data.get("lon"),
+        category=data.get("category"),
+        url=data.get("url"),
+        price_min=data.get("price_min"),
+        price_max=data.get("price_max"),
+    )
+
+
+def _webresult_out_from_dict(data: dict) -> WebResultOut:
+    return WebResultOut(
+        source=data.get("source", ""),
+        title=data.get("title", "Untitled"),
+        url=data.get("url", ""),
+        snippet=data.get("snippet"),
+        page_age=data.get("page_age"),
+    )
 
 
 # ─────────────────────────────────────────────
@@ -418,3 +457,102 @@ async def combined_events(
             logger.error("Failed to write debug dump: %s", exc)
 
     return combined
+
+@app.get("/events/mined", response_model=list[EventOut])
+def list_events_mined(
+    city: str | None = Query(
+        None,
+        description="City name, e.g. 'Philadelphia, PA'. Optional if 'location' is provided.",
+    ),
+    location: str | None = Query(
+        None,
+        description="Free-form location string. Used to match a mined snapshot filename.",
+    ),
+):
+    """
+    Return events from the latest mined snapshot for this location.
+    This does NOT call Ticketmaster/You/Parallel live.
+    """
+    query = (location or city or "").strip()
+    if not query:
+        raise HTTPException(
+            status_code=400,
+            detail="Either 'city' or 'location' is required.",
+        )
+
+    snapshot = load_latest_snapshot(query)
+    if not snapshot:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No mined snapshot found for location '{query}'. "
+                   "Make sure the mining job has run for this city.",
+        )
+
+    # Prefer combined_events if present, otherwise fallback to raw events
+    raw_events = snapshot.get("combined_events") or snapshot.get("events") or []
+
+    events_out: list[EventOut] = []
+    for item in raw_events:
+        if not isinstance(item, dict):
+            continue
+        try:
+            events_out.append(_event_out_from_dict(item))
+        except Exception as exc:
+            logger.warning("Failed to parse mined event: %s", exc)
+
+    return events_out
+
+@app.get("/events/combined/mined", response_model=CombinedResult)
+def combined_events_mined(
+    city: str | None = Query(
+        None,
+        description="City name, e.g. 'Philadelphia, PA'. Optional if 'location' is provided.",
+    ),
+    location: str | None = Query(
+        None,
+        description="Free-form location string used to match a mined snapshot.",
+    ),
+):
+    """
+    Combined view from the latest mined snapshot:
+    - events: combined_events (Ticketmaster + PWS) if present
+    - web_results: You.com + AgentQL from snapshot
+    - parallel_report: raw text report (if present)
+    """
+    query = (location or city or "").strip()
+    if not query:
+        raise HTTPException(
+            status_code=400,
+            detail="Either 'city' or 'location' is required.",
+        )
+
+    snapshot = load_latest_snapshot(query)
+    if not snapshot:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No mined snapshot found for '{query}'.",
+        )
+
+    raw_events = snapshot.get("combined_events") or snapshot.get("events") or []
+    raw_web = snapshot.get("web_results", [])
+    raw_parallel = snapshot.get("parallel_report")
+
+    # Let CombinedResult / Pydantic coerce dicts → proper models.
+    # If CombinedResult is a Pydantic model, this is fine.
+    combined = CombinedResult(
+        city=snapshot.get("location_query", query),
+        days_ahead=snapshot.get("time_window", {}).get(
+            "days_ahead", settings.default_days_ahead
+        ),
+        events=raw_events,
+        web_results=raw_web,
+        parallel_report=(
+            raw_parallel.get("raw")
+            if isinstance(raw_parallel, dict)
+            else None
+        ),
+    )
+
+    return combined
+
+
