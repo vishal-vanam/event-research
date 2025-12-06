@@ -7,6 +7,7 @@ import uuid
 from app.snapshot import load_latest_snapshot
 from app.models import Event
 import re
+
 import httpx
 from fastapi import FastAPI, Query, HTTPException
 from pydantic import BaseModel
@@ -27,7 +28,8 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 # Geocoding helper (generic: city / address / neighborhood)
 # ─────────────────────────────────────────────
-KNOWN_COORDS = { # TO-DO: remove after testing
+
+KNOWN_COORDS = {  # TO-DO: remove after testing
     # Jersey City
     "jersey city": (40.7178, -74.0431),
     "jersey city, nj": (40.7178, -74.0431),
@@ -37,6 +39,8 @@ KNOWN_COORDS = { # TO-DO: remove after testing
     "philadelphia, pa": (39.9526, -75.1652),
     "philly": (39.9526, -75.1652),
 }
+
+
 def geocode_location(query: str):
     """
     Geocode ANY free-form location string: street, neighborhood, city, etc.
@@ -68,12 +72,42 @@ def geocode_location(query: str):
 
     return float(data[0]["lat"]), float(data[0]["lon"])
 
+
 def _normalize_loc_for_snapshot(query: str) -> str:
     # keep this consistent with snapshot.py & mine_location.py
     return query.lower().replace(" ", "_").replace(",", "")
 
 
-def _event_out_from_dict(data: dict) -> "EventOut":
+# ─────────────────────────────────────────────
+# API models (Pydantic output wrappers)
+# ─────────────────────────────────────────────
+
+class WebResultOut(BaseModel):
+    source: str
+    title: str
+    url: str
+    snippet: str | None = None
+    page_age: str | None = None
+
+
+class EventOut(BaseModel):
+    id: str
+    source: str
+    name: str
+    start_time: str
+    end_time: str | None = None
+    venue_name: str | None = None
+    city: str | None = None
+    country: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    category: str | None = None
+    url: str | None = None
+    price_min: float | None = None
+    price_max: float | None = None
+
+
+def _event_out_from_dict(data: dict) -> EventOut:
     """
     Take one event dict from a snapshot (event_to_dict output)
     and convert it into EventOut for the API.
@@ -106,37 +140,7 @@ def _webresult_out_from_dict(data: dict) -> WebResultOut:
     )
 
 
-# ─────────────────────────────────────────────
-# API models (Pydantic output wrappers)
-# ─────────────────────────────────────────────
-
-class WebResultOut(BaseModel):
-    source: str
-    title: str
-    url: str
-    snippet: str | None = None
-    page_age: str | None = None
-
-
-class EventOut(BaseModel):
-    id: str
-    source: str
-    name: str
-    start_time: str
-    end_time: str | None = None
-    venue_name: str | None = None
-    city: str | None = None
-    country: str | None = None
-    lat: float | None = None
-    lon: float | None = None
-    category: str | None = None
-    url: str | None = None
-    price_min: float | None = None
-    price_max: float | None = None
-
-
 app = FastAPI(title="City Events API", version="0.2.0")
-
 
 # ─────────────────────────────────────────────
 # Health
