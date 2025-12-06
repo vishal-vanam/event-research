@@ -73,7 +73,7 @@ def _normalize_loc_for_snapshot(query: str) -> str:
     return query.lower().replace(" ", "_").replace(",", "")
 
 
-def _event_out_from_dict(data: dict) -> EventOut:
+def _event_out_from_dict(data: dict) -> "EventOut":
     """
     Take one event dict from a snapshot (event_to_dict output)
     and convert it into EventOut for the API.
