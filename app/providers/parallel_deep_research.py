@@ -125,9 +125,6 @@ class ParallelDeepResearchProvider:
             logger.error("Parallel Deep Research result had no 'output' field: %r", run_result)
             return None
 
-        # HARD DEBUG: always visible even if logging misconfigures
-        print("[pws-debug] output type:", type(output))
-        print("[pws-debug] output repr snippet:", repr(output)[:600])
         # ------------------------------------------------------------------
         # 1) Try to extract structured JSON-like data from the SDK objects
         # ------------------------------------------------------------------

@@ -51,7 +51,7 @@ def geocode_location(query: str):
     params = {"q": query, "format": "json", "limit": 1}
     headers = {
         # Nominatim requires a custom User-Agent
-        "User-Agent": "event-research-app/1.0 (contact: you@example.com)"
+        "User-Agent": "event-intelligence-platform/1.0 (https://github.com/vishal-vanam/event-intelligence-platform)"
     }
     key = query.strip().lower()
     if key in KNOWN_COORDS:
